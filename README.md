@@ -1,7 +1,6 @@
 # EnrollMate
 A Stacked, Gradient-Boosting Model for Binary Classification of Clinical Enrollment Targets
 
-Machine Learning Model for Clinical Trial Success Prediction
 This repository contains the code for a machine learning model designed to predict the success of clinical trials. The model is built using the LightGBM framework and incorporates a comprehensive set of features, including demographic data, study design elements, and text-based information.
 
 ## Getting Started
