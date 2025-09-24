@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # 1) LOAD DATA & CREATE TARGET
 # ---------------------------------------------
 
-df = pd.read_csv("DATASET FILE PATH GOES HERE")
+df = pd.read_csv("/Users/gg027/Desktop/full_final_dataset.csv")
 df["success"] = (df["Percentage"] >= 100).astype(int)
 
 ## Now, we will create the basis of the engineered features EnrollMate will lose
@@ -40,6 +40,7 @@ for band in bands:
 # ---------------------------------------------
 # 4) POPULATION-RELATED FEATURES
 # ---------------------------------------------
+#! Condenses all population related metrics into a list. This convention will be used throughout the model. 
 pop_features = []
 for band in bands:
     for m in pop_metrics:
@@ -49,15 +50,22 @@ for band in bands:
 # ---------------------------------------------
 # 5) AGE BREAKDOWN FEATURES
 # ---------------------------------------------
+#! - Here we clean the "Age" column and then engineer categorical features about the trial's age group composition.
+
+#* We replace all missing values with an empty string, turn everything uppercase, and make sure that commas are standardized with no extra spaces.
 df["Age_clean"] = (
     df["Age"].fillna("")
              .str.upper()
              .str.replace(r"\s*,\s*", ",", regex=True)
              .str.strip(",")
 )
+
+#* We create binary indicators for each age group and whether there are mixed age groups.
 df["Only_Children"] = (df["Age_clean"] == "CHILD").astype(int)
 df["Only_Adults"]   = (df["Age_clean"] == "ADULT").astype(int)
 df["Mixed_Age"]     = df["Age_clean"].str.contains(",").astype(int)
+
+#* We also count the number of age groups and create a heuristic "Age Difficulty" score (Only children with a score of 2, mixed with a score of 1, and all else with a score of 0 )
 df["N_Age_Groups"]  = df["Age_clean"].str.count(",").fillna(0).astype(int) + 1
 df["Age_Difficulty"] = 0
 df.loc[df["Only_Children"] == 1, "Age_Difficulty"] = 2
@@ -67,6 +75,9 @@ age_features = ["Only_Children","Only_Adults","Mixed_Age","N_Age_Groups","Age_Di
 # ---------------------------------------------
 # 6) PHASE ONE-HOT
 # ---------------------------------------------
+#! - Here we add one-hot encoded columns for the phase data
+#* We replace NaN's with empty strings, normalize case, map "Early Phase 1" to "Phase 1", and remove leading/trailing pipes
+
 df["Phases_clean"] = (
     df["Phases"].fillna("")
                 .str.upper()
@@ -82,6 +93,8 @@ phase_features = phase_dummies.columns.tolist()
 # ---------------------------------------------
 # 7) OUTCOME-COUNT FEATURES
 # ---------------------------------------------
+#! - Here, we simply make a count of primary outcomes by treating semicolons as separators
+
 df["n_primary_outcomes"]   = df["Primary Outcome Measures"].fillna("").str.count(r";\s*") + 1
 
 outcome_features = ["n_primary_outcomes"]
@@ -89,16 +102,21 @@ outcome_features = ["n_primary_outcomes"]
 # ---------------------------------------------
 # 8) DURATION FEATURE
 # ---------------------------------------------
+#! We parse Start Date and Primary Completion Data Strings strings into Pandas Datetimes
+
 df["Start Date"] = pd.to_datetime(df["Start Date"], format='mixed', errors='coerce')
 df['start_month'] = df['Start Date'].dt.month
 df['start_year'] = df['Start Date'].dt.year
-
 df["Primary Completion Date"] = pd.to_datetime(df["Primary Completion Date"], format='mixed', errors='coerce')
+
+#! We create a planned duration feature as well
 df["Planned_Duration"]  = (df["Primary Completion Date"] - df["Start Date"]).dt.days
 duration_features = ["Planned_Duration"] + ["start_month"] + ["start_year"]
 # ---------------------------------------------
 # 9) STUDY-DESIGN FLAGS
 # ---------------------------------------------
+#! Here we turn "Study Design" text into one-hot columns by regex-matching key phrases
+
 design_flags = {
     'has_randomized':   r'randomiz',
     'has_double_blind': r'double[- ]blind',
@@ -112,6 +130,8 @@ design_features = list(design_flags.keys())
 # ---------------------------------------------
 # 10) INTERACTIONS
 # ---------------------------------------------
+#! We create interaction features here, multiplying the "Planned_Duration" by the log populatiojn of nearby groups, to capture a relationship between the effect of duration and local population size
+
 df["Dur_x_black_0_5"]   = df["Planned_Duration"] * df["0-5_black_population_log"]
 df["Dur_x_hispanic_0_5"]   = df["Planned_Duration"] * df["0-5_hispanic_population_log"]
 df["Dur_x_asian_0_5"]   = df["Planned_Duration"] * df["0-5_asian_population_log"]
@@ -121,6 +141,8 @@ interaction_features = ["Dur_x_black_0_5", "Dur_x_hispanic_0_5", "Dur_x_asian_0_
 # ---------------------------------------------
 # 11) TEXT-BASED FEATURES
 # ---------------------------------------------
+#! We make features from the "Brief Summary" text, based on length and keyword flags
+
 df["sum_len_words"] = df["Brief Summary"].str.split().str.len().fillna(0)
 df["sum_len_sents"] = df["Brief Summary"].str.count(r"[\.!?]") + 1
 text_keywords = ['efficacy','safety','pilot']
@@ -132,6 +154,8 @@ text_features = ["sum_len_words","sum_len_sents"] + [f"has_{kw}" for kw in text_
 # ---------------------------------------------
 # 12) FUNDER TYPE ONE-HOT
 # ---------------------------------------------
+#! One-hot encoded Features made from the "Funder Type" column (Funder_INDUSTRY, Funder_NIH, Funder_OTHER)
+
 df["Funder Type"] = df["Funder Type"].fillna("OTHER").str.upper()
 funder_dummies   = pd.get_dummies(df["Funder Type"], prefix="Funder")
 df = pd.concat([df, funder_dummies], axis=1)
@@ -140,15 +164,20 @@ funder_features  = funder_dummies.columns.tolist()
 # ---------------------------------------------
 # 13) MISCELLANEOUS
 # ---------------------------------------------
+#! - Create a count of listed conditions
+
 df['n_conditions'] = df['Conditions'].fillna('').str.count(r';\s*') + 1
 misc_feats = ['n_conditions']
 
 # ---------------------------------------------
 # 14) TITLE TF-IDF & KEYWORD FLAGS
 # ---------------------------------------------
-tfidf     = TfidfVectorizer(max_features=100, ngram_range=(1,2), stop_words="english")
-X_title   = tfidf.fit_transform(df["Study Title"].fillna("")).toarray()
+#! - We use the TfidfVectorizer to keep only the 100 most informative terms (including unigrams and bigrams) in Study Titles
+
+tfidf = TfidfVectorizer(max_features=100, ngram_range=(1,2), stop_words="english")
+X_title = tfidf.fit_transform(df["Study Title"].fillna("")).toarray()
 title_feats = pd.DataFrame(X_title, columns=[f"title_{t}" for t in tfidf.get_feature_names_out()])
+assert title_feats.index.equals(df.index), "Row index misalignment: title_feats vs df"
 df = pd.concat([df, title_feats], axis=1)
 df["title_word_count"]  = df["Study Title"].str.split().str.len().fillna(0)
 df["title_char_count"]  = df["Study Title"].str.len().fillna(0)
@@ -162,9 +191,12 @@ title_features = title_feats.columns.tolist() + [
     "title_efficacy","title_has_acronym"
 ]
 
+
 # ---------------------------------------------
 # 14.1) Conditions
 # ---------------------------------------------
+#! Here, we do the TF-IDF Counts for the "Conditions" column
+
 tfidf = TfidfVectorizer(max_features=100, ngram_range=(1, 2), stop_words="english")
 X_conditions = tfidf.fit_transform(df["Conditions"].fillna("")).toarray()
 conditions_feats = pd.DataFrame(X_conditions, columns=[f"conditions_{t}" for t in tfidf.get_feature_names_out()])
@@ -184,6 +216,8 @@ conditions_features = conditions_feats.columns.tolist() + [
 # ---------------------------------------------
 # 14.2) MetaData Section
 # ---------------------------------------------
+#! Turns metadata columns into proper model features
+
 def parse_age(age_str):
     if pd.isna(age_str):
         return None
@@ -202,6 +236,7 @@ meta_feats = ["min_age"] + ["max_age"] + ["sex_all"] + ["sex_female"] + ["sex_ma
 # ---------------------------------------------
 # 14.3) TopAcademic Section
 # ---------------------------------------------
+#! Binary FLag if the trial's "Locations" column mentions a medical center from the curated list
 
 top_academic_keywords = [
     # U.S. Academic Medical Centers
@@ -231,36 +266,41 @@ top_academic = ["top_academic"]
 # ---------------------------------------------
 # 14.4) INTERVENTION TYPE ONE-HOT
 # ---------------------------------------------
-df["Interventions_clean"] = df["Interventions"].fillna("").astype(str).str.upper().str.strip()
+#! Here, we one-hot encode intervention types from the "Interventions" column and then add
 
+df["Interventions_clean"] = (
+    df["Interventions"].fillna("").astype(str).str.upper().str.strip()
+)
 
-intervention_patterns = {
-    "DRUG": r"^DRUG:",
-    "DEVICE": r"^DEVICE:",
-    "BIOLOGICAL": r"^BIOLOGICAL:",
-    "BEHAVIORAL": r"^BEHAVIORAL:",
-    "PROCEDURE": r"^PROCEDURE:",
-    "RADIATION": r"^RADIATION:",
-    "DIETARY_SUPPLEMENT": r"^DIETARY SUPPLEMENT:",
-    "OTHER": r"^OTHER:", 
-    }
+SEP = r"(?:^|\s*[|;]\s*)"  
+
+types = {
+    "DRUG": "DRUG",
+    "DEVICE": "DEVICE",
+    "BIOLOGICAL": "BIOLOGICAL",
+    "BEHAVIORAL": "BEHAVIORAL",
+    "PROCEDURE": "PROCEDURE",
+    "RADIATION": "RADIATION",
+    "DIETARY_SUPPLEMENT": "DIETARY SUPPLEMENT",
+    "OTHER": "OTHER",
+}
+
 intervention_features = []
-for type_name, pattern in intervention_patterns.items():
-    col_name = f"InterventionType_{type_name}"
-    # Use str.contains with regex for the pattern matching
-    df[col_name] = df["Interventions_clean"].str.contains(pattern, regex=True, na=False).astype(int)
-    intervention_features.append(col_name)
+for name, label in types.items():
+    col = f"InterventionType_{name}"
+    pattern = rf"{SEP}{re.escape(label)}:" 
+    df[col] = df["Interventions_clean"].str.contains(pattern, regex=True, na=False).astype(int)
+    intervention_features.append(col)
 
 df["has_intervention_type"] = (df[intervention_features].sum(axis=1) > 0).astype(int)
 intervention_features.append("has_intervention_type")
-
-print(f"Created {len(intervention_features)} intervention type features.")
-print(df[intervention_features].head()) # Display first few rows of new features
 
 
 # ---------------------------------------------
 # 15) COMBINE FEATURES
 # ---------------------------------------------
+#! Full list of features names compiled
+
 features = (
     pop_features
   + age_features
@@ -313,12 +353,12 @@ clf_params = {
     'reg_alpha': 0.13411729586865326,
     'reg_lambda': 5.1560928274929886e-08,
     'max_bin': 500,
-    'random_state': 42, # Add for reproducibility
-    'is_unbalance': True # Often helpful for PR AUC
+    'random_state': 42, 
+    'is_unbalance': True 
 }
 
 # ---------------------------------------------
-# 17) LIGHTGBM 5-FOLD CV WITH ENSEMBLE (CORRECTED LEAKAGE-FREE STRUCTURE)
+# 17) LIGHTGBM 5-FOLD CV WITH ENSEMBLE 
 # ---------------------------------------------
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
@@ -614,6 +654,81 @@ print("="*24 + " END OF ABLATION STUDY " + "="*25)
 print("="*70)
 
 # ---------------------------------------------
+# 17.4) TEMPORAL VALIDATION (TRAIN PAST -> TEST FUTURE)
+# ---------------------------------------------
+# Notes:
+# - Uses df_model['Start Date'] (already parsed above) to create time-based splits.
+# - Scaler + Selector are fit ONLY on the train slice (no leakage).
+# - Uses a fixed decision threshold (THRESH=0.60) to mirror prior sections.
+# - TF-IDF vocab/IDF were fit on full data earlier; for PERFECTLY leak-free text,
+#   move TF-IDF into the fold/split loop and fit on train only before transforming.
+# ---------------------------------------------
+
+THRESH = 0.60
+
+# Keep rows that have Start Date available for temporal splits
+date_mask = df_model["Start Date"].notna()
+df_time = df_model.loc[date_mask].copy()
+X_time   = X.loc[df_time.index].copy()
+y_time   = y.loc[df_time.index].copy()
+
+# -----------------------------
+# (A) SINGLE TEMPORAL HOLDOUT
+# -----------------------------
+# Example: train on all trials starting <= Dec 31 of the penultimate year,
+#          test on all trials starting in the last year.
+years_sorted = sorted(df_time["Start Date"].dt.year.unique())
+if len(years_sorted) >= 2:
+    holdout_year = years_sorted[-1]                                   # last year in data
+    cutoff_date  = pd.Timestamp(year=holdout_year-1, month=12, day=31) # end of prior year
+else:
+    # Fallback: if only one year exists, set cutoff mid-year (adjust as needed)
+    only_year = years_sorted[0]
+    cutoff_date = pd.Timestamp(year=only_year, month=6, day=30)
+
+train_mask = df_time["Start Date"] <= cutoff_date
+test_mask  = df_time["Start Date"] >  cutoff_date
+
+X_tr_t, X_te_t = X_time.loc[train_mask], X_time.loc[test_mask]
+y_tr_t, y_te_t = y_time.loc[train_mask], y_time.loc[test_mask]
+
+print("\n--- Temporal Holdout Setup ---")
+print(f"Cutoff date: {cutoff_date.date()}")
+print(f"Train size: {X_tr_t.shape[0]} | Test size: {X_te_t.shape[0]} | Holdout year(s): {sorted(df_time.loc[test_mask, 'Start Date'].dt.year.unique().tolist())}")
+
+# Scale -> Select -> Train (use mean best_iters from CV, like your final model)
+scaler_t   = StandardScaler()
+X_tr_s_t   = scaler_t.fit_transform(X_tr_t)
+X_te_s_t   = scaler_t.transform(X_te_t)
+
+selector_t = SelectFromModel(estimator=LGBMClassifier(**clf_params), threshold='median')
+X_tr_sel_t = selector_t.fit_transform(X_tr_s_t, y_tr_t)
+X_te_sel_t = selector_t.transform(X_te_s_t)
+
+final_iter_t = int(np.mean(best_iters)) if len(best_iters) else 2000
+
+clf_t = LGBMClassifier(**clf_params, n_estimators=final_iter_t)
+clf_t.fit(X_tr_sel_t, y_tr_t)
+
+probs_te_t = clf_t.predict_proba(X_te_sel_t)[:, 1]
+preds_te_t = (probs_te_t >= THRESH).astype(int)
+
+temporal_roc_auc   = roc_auc_score(y_te_t, probs_te_t) if X_te_sel_t.shape[0] > 0 else np.nan
+temporal_pr_auc    = average_precision_score(y_te_t, probs_te_t) if X_te_sel_t.shape[0] > 0 else np.nan
+temporal_f1        = f1_score(y_te_t, preds_te_t) if X_te_sel_t.shape[0] > 0 else np.nan
+temporal_precision = precision_score(y_te_t, preds_te_t, zero_division=0) if X_te_sel_t.shape[0] > 0 else np.nan
+temporal_recall    = recall_score(y_te_t, preds_te_t, zero_division=0) if X_te_sel_t.shape[0] > 0 else np.nan
+temporal_accuracy  = accuracy_score(y_te_t, preds_te_t) if X_te_sel_t.shape[0] > 0 else np.nan
+
+print("\n--- Temporal Holdout Results ---")
+print(f"ROC AUC:   {temporal_roc_auc:.4f}")
+print(f"PR  AUC:   {temporal_pr_auc:.4f}")
+print(f"F1 Score:  {temporal_f1:.4f}")
+print(f"Precision: {temporal_precision:.4f}")
+print(f"Recall:    {temporal_recall:.4f}")
+print(f"Accuracy:  {temporal_accuracy:.4f}")
+
+# ---------------------------------------------
 # 18) TRAIN FINAL MODEL & SHOW IMPORTANCES (CORRECTED)
 # ---------------------------------------------
 print("\n--- Training Final Model on Full Dataset ---")
@@ -666,3 +781,116 @@ plt.title("SHAP Summary: Impact on Predicting Trial Success", fontsize=16)
 plt.tight_layout()
 plt.show()
 
+# ---------------------------------------------
+# 20) SAVE METRICS (CV, ENSEMBLE, TEMPORAL)
+# ---------------------------------------------
+import os
+from datetime import datetime
+
+out_dir = "model_outputs"
+os.makedirs(out_dir, exist_ok=True)
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# 20.1) Per-fold metrics table
+per_fold_df = pd.DataFrame({
+    "fold":           list(range(1, len(cv_roc_aucs)+1)),
+    "roc_auc":        cv_roc_aucs,
+    "pr_auc":         cv_pr_aucs,
+    "f1":             cv_f1_scores,
+    "precision":      cv_precision_scores,
+    "recall":         cv_recall_scores,
+    "accuracy":       cv_accuracy_scores,
+    "best_iteration": best_iters
+})
+per_fold_path = os.path.join(out_dir, f"per_fold_metrics_{timestamp}.csv")
+per_fold_df.to_csv(per_fold_path, index=False)
+
+# 20.2) Summary rows 
+summary_rows = [
+    {
+        "model":         "Single (CV mean)",
+        "roc_auc":       float(np.mean(cv_roc_aucs)),
+        "roc_auc_std":   float(np.std(cv_roc_aucs)),
+        "pr_auc":        float(np.mean(cv_pr_aucs)),
+        "pr_auc_std":    float(np.std(cv_pr_aucs)),
+        "f1":            float(np.mean(cv_f1_scores)),
+        "f1_std":        float(np.std(cv_f1_scores)),
+        "precision":     float(np.mean(cv_precision_scores)),
+        "precision_std": float(np.std(cv_precision_scores)),
+        "recall":        float(np.mean(cv_recall_scores)),
+        "recall_std":    float(np.std(cv_recall_scores)),
+        "accuracy":      float(np.mean(cv_accuracy_scores)),
+        "accuracy_std":  float(np.std(cv_accuracy_scores)),
+        "threshold":     0.5940
+    },
+    {
+        "model":         "Ensemble (OOF mean)",
+        "roc_auc":       float(ensemble_roc_auc),
+        "roc_auc_std":   np.nan,
+        "pr_auc":        float(ensemble_pr_auc),
+        "pr_auc_std":    np.nan,
+        "f1":            float(ensemble_f1),
+        "f1_std":        np.nan,
+        "precision":     float(ensemble_precision),
+        "precision_std": np.nan,
+        "recall":        float(ensemble_recall),
+        "recall_std":    np.nan,
+        "accuracy":      float(ensemble_accuracy),
+        "accuracy_std":  np.nan,
+        "threshold":     0.60
+    }
+]
+
+# Append Temporal Metrics
+if 'temporal_roc_auc' in globals():
+    summary_rows.append({
+        "model":         "Temporal (holdout)",
+        "roc_auc":       float(temporal_roc_auc)   if pd.notna(temporal_roc_auc)   else np.nan,
+        "roc_auc_std":   np.nan,
+        "pr_auc":        float(temporal_pr_auc)    if pd.notna(temporal_pr_auc)    else np.nan,
+        "pr_auc_std":    np.nan,
+        "f1":            float(temporal_f1)        if pd.notna(temporal_f1)        else np.nan,
+        "f1_std":        np.nan,
+        "precision":     float(temporal_precision) if pd.notna(temporal_precision) else np.nan,
+        "precision_std": np.nan,
+        "recall":        float(temporal_recall)    if pd.notna(temporal_recall)    else np.nan,
+        "recall_std":    np.nan,
+        "accuracy":      float(temporal_accuracy)  if pd.notna(temporal_accuracy)  else np.nan,
+        "accuracy_std":  np.nan,
+        "threshold":     float(THRESH) if 'THRESH' in globals() else np.nan
+    })
+
+summary_df = pd.DataFrame(summary_rows)
+summary_path = os.path.join(out_dir, f"metrics_summary_{timestamp}.csv")
+summary_df.to_csv(summary_path, index=False)
+
+# 20.3) Save final model importances too (optional)
+imp_path = os.path.join(out_dir, f"final_model_feature_importance_{timestamp}.csv")
+importance_df.to_csv(imp_path, index=False)
+
+# 20.4) Detailed temporal file 
+if 'cutoff_date' in globals():
+    temporal_details = {
+        "cutoff_date":   str(cutoff_date.date()),
+        "train_rows":    int(X_tr_t.shape[0]) if 'X_tr_t' in globals() else np.nan,
+        "test_rows":     int(X_te_t.shape[0]) if 'X_te_t' in globals() else np.nan,
+        "roc_auc":       float(temporal_roc_auc)   if 'temporal_roc_auc'   in globals() else np.nan,
+        "pr_auc":        float(temporal_pr_auc)    if 'temporal_pr_auc'    in globals() else np.nan,
+        "f1":            float(temporal_f1)        if 'temporal_f1'        in globals() else np.nan,
+        "precision":     float(temporal_precision) if 'temporal_precision' in globals() else np.nan,
+        "recall":        float(temporal_recall)    if 'temporal_recall'    in globals() else np.nan,
+        "accuracy":      float(temporal_accuracy)  if 'temporal_accuracy'  in globals() else np.nan,
+        "threshold":     float(THRESH) if 'THRESH' in globals() else np.nan
+    }
+    temporal_df = pd.DataFrame([temporal_details])
+    temporal_path = os.path.join(out_dir, f"temporal_metrics_{timestamp}.csv")
+    temporal_df.to_csv(temporal_path, index=False)
+else:
+    temporal_path = None
+
+print("\nSaved files:")
+print(" -", per_fold_path)
+print(" -", summary_path)
+print(" -", imp_path)
+if temporal_path:
+    print(" -", temporal_path)
